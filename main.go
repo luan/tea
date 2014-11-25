@@ -18,46 +18,59 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-func readLoop(c *websocket.Conn, w io.Writer) {
+func readLoop(c *websocket.Conn, w io.Writer, done chan bool) {
 	for {
 		_, m, err := c.ReadMessage()
 		if err != nil {
 			log.Println(err)
+			done <- true
 			return
 		}
 		w.Write(m)
 	}
 }
 
-func writeLoop(c *websocket.Conn, r io.Reader) {
+func writeLoop(c *websocket.Conn, r io.Reader, done chan bool) {
 	br := bufio.NewReader(r)
 	for {
-		x, size, _ := br.ReadRune()
+		x, size, err := br.ReadRune()
+		if err != nil {
+			log.Println(err)
+			done <- true
+			return
+		}
+
 		p := make([]byte, size)
 		utf8.EncodeRune(p, x)
 
-		err := c.WriteMessage(websocket.TextMessage, p)
+		err = c.WriteMessage(websocket.TextMessage, p)
 		if err != nil {
-			panic(err)
+			log.Println(err)
+			done <- true
+			return
 		}
 	}
 }
 
 func shellHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
+	defer ws.Close()
 
 	cmd := exec.Command("/bin/bash", "-l")
 	f, err := pty.Start(cmd)
 
-	go readLoop(conn, f)
-	writeLoop(conn, f)
+	done := make(chan bool)
+	go readLoop(ws, f, done)
+	go writeLoop(ws, f, done)
+	<-done
 }
 
 func main() {
+	log.Println("Listening on port 8080")
 	http.HandleFunc("/shell", shellHandler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
