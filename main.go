@@ -2,11 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/gob"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"syscall"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
@@ -18,15 +23,39 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-func readLoop(c *websocket.Conn, w io.Writer, done chan bool) {
+type Winsize struct {
+	Height uint16
+	Width  uint16
+	x      uint16
+	y      uint16
+}
+
+func SetWinsize(fd uintptr, ws *Winsize) error {
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(ws)))
+	return err
+}
+
+func readLoop(c *websocket.Conn, w *os.File, done chan bool) {
 	for {
-		_, m, err := c.ReadMessage()
-		if err != nil {
-			log.Println(err)
-			done <- true
-			return
+		mType, m, err := c.ReadMessage()
+		if mType == websocket.TextMessage {
+			if err != nil {
+				log.Println(err)
+				done <- true
+				return
+			}
+			w.Write(m)
+		} else if mType == websocket.BinaryMessage {
+			dec := gob.NewDecoder(bytes.NewReader(m))
+			winsize := &Winsize{}
+			dec.Decode(winsize)
+			SetWinsize(w.Fd(), winsize)
+			if err != nil {
+				log.Println(err)
+				done <- true
+				return
+			}
 		}
-		w.Write(m)
 	}
 }
 
