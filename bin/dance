@@ -1,0 +1,13 @@
+#!/bin/bash -e
+
+[ -z "$RECEPTOR" ] && export RECEPTOR=http://receptor.192.168.11.11
+BUCKET=$1
+[ -z "$BUCKET" ] && BUCKET=tiego-artifacts
+
+
+pushd $GOPATH/src/github.com/luan/tea
+
+bin/build && \
+  bin/upload $BUCKET
+
+popd

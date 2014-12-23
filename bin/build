@@ -1,0 +1,17 @@
+#!/bin/bash
+
+green="\033[32m\033[1m"
+reset="\033[0m"
+
+pushd $GOPATH/src/github.com/luan/tea
+
+echo -e "$green===> building tea...$reset"
+go get -v ./...
+GOOS=linux go build ./cmd/tea
+filename=tea-$(date +"%Y%m%d%H%M%S").tgz
+mkdir -p tmp/builds/
+tar czvf tmp/builds/$filename tea
+rm -f tea
+
+popd
+
