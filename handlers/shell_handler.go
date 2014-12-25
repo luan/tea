@@ -48,14 +48,20 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f, err := pty.Start(cmd)
 
 	done := make(chan bool)
-	go s.readLoop(ws, f, done)
-	go s.writeLoop(ws, f, done)
+	quit := make(chan struct{})
+	go s.readLoop(ws, f, done, quit)
+	go s.writeLoop(ws, f, done, quit)
 	go func() {
 		pingInterval := 5 * time.Second
 		c := time.Tick(pingInterval)
 		for _ = range c {
-			if err := ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2*time.Second)); err != nil {
-				done <- true
+			select {
+			case <-quit:
+				return
+			default:
+				if err := ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2*time.Second)); err != nil {
+					done <- true
+				}
 			}
 		}
 		ws.SetPongHandler(func(string) error {
@@ -63,6 +69,7 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 	<-done
+	close(quit)
 
 	log.Info("closing-shell")
 	err = f.Close()
@@ -76,50 +83,60 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *ShellHandler) readLoop(c *websocket.Conn, w *os.File, done chan bool) {
+func (s *ShellHandler) readLoop(c *websocket.Conn, w *os.File, done chan<- bool, quit <-chan struct{}) {
 	log := s.logger.Session("shell-handler")
 	for {
-		mType, m, err := c.ReadMessage()
-		if mType == websocket.TextMessage {
-			if err != nil {
-				log.Error("read-error", err)
-				done <- true
-				return
-			}
-			w.Write(m)
-		} else if mType == websocket.BinaryMessage {
-			dec := gob.NewDecoder(bytes.NewReader(m))
-			winsize := &utils.Winsize{}
-			dec.Decode(winsize)
-			utils.SetWinsize(w.Fd(), winsize)
-			if err != nil {
-				log.Error("read-error", err)
-				done <- true
-				return
+		select {
+		case <-quit:
+			return
+		default:
+			mType, m, err := c.ReadMessage()
+			if mType == websocket.TextMessage {
+				if err != nil {
+					log.Error("read-error", err)
+					done <- true
+					return
+				}
+				w.Write(m)
+			} else if mType == websocket.BinaryMessage {
+				dec := gob.NewDecoder(bytes.NewReader(m))
+				winsize := &utils.Winsize{}
+				dec.Decode(winsize)
+				utils.SetWinsize(w.Fd(), winsize)
+				if err != nil {
+					log.Error("read-error", err)
+					done <- true
+					return
+				}
 			}
 		}
 	}
 }
 
-func (s *ShellHandler) writeLoop(c *websocket.Conn, r io.Reader, done chan bool) {
+func (s *ShellHandler) writeLoop(c *websocket.Conn, r io.Reader, done chan<- bool, quit <-chan struct{}) {
 	log := s.logger.Session("shell-handler")
 	br := bufio.NewReader(r)
 	for {
-		x, size, err := br.ReadRune()
-		if err != nil {
-			log.Error("write-error", err)
-			done <- true
+		select {
+		case <-quit:
 			return
-		}
+		default:
+			x, size, err := br.ReadRune()
+			if err != nil {
+				log.Error("write-error", err)
+				done <- true
+				return
+			}
 
-		p := make([]byte, size)
-		utf8.EncodeRune(p, x)
+			p := make([]byte, size)
+			utf8.EncodeRune(p, x)
 
-		err = c.WriteMessage(websocket.TextMessage, p)
-		if err != nil {
-			log.Error("write-error", err)
-			done <- true
-			return
+			err = c.WriteMessage(websocket.TextMessage, p)
+			if err != nil {
+				log.Error("write-error", err)
+				done <- true
+				return
+			}
 		}
 	}
 }
