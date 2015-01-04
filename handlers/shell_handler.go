@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/gob"
 	"io"
 	"net/http"
 	"os"
@@ -13,9 +11,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
-	"github.com/luan/tea/utils"
 	"github.com/pivotal-golang/lager"
 )
+
+type ioItem struct {
+	data []byte
+	err  error
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -46,30 +48,61 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 	f, err := pty.Start(cmd)
+	if err != nil {
+		log.Error("error-starting-pty", err)
+		return
+	}
 
-	done := make(chan bool)
+	input, output := make(chan ioItem), make(chan ioItem)
 	quit := make(chan struct{})
-	go s.readLoop(ws, f, done, quit)
-	go s.writeLoop(ws, f, done, quit)
-	go func() {
-		pingInterval := 5 * time.Second
-		c := time.Tick(pingInterval)
-		for _ = range c {
-			select {
-			case <-quit:
-				return
-			default:
-				if err := ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2*time.Second)); err != nil {
-					done <- true
-				}
+	go readLoop(ws, input, quit)
+	go writeLoop(f, output, quit)
+
+	pingInterval := 5 * time.Second
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(pingInterval + 500*time.Millisecond))
+	})
+	var pong chan error
+dance:
+	for {
+		ping := time.After(pingInterval)
+
+		select {
+		case i := <-input:
+			if i.err != nil {
+				log.Error("socket-read-error", err)
+				close(quit)
 			}
+			_, err = f.Write(i.data)
+			if i.err != nil {
+				log.Error("read-error", err)
+				close(quit)
+			}
+		case o := <-output:
+			if o.err != nil {
+				log.Error("write-error", err)
+				close(quit)
+			}
+			err = ws.WriteMessage(websocket.TextMessage, o.data)
+			if err != nil {
+				log.Error("socket-write-error", err)
+				close(quit)
+			}
+		case <-ping:
+			pong = make(chan error)
+			go func() {
+				pong <- ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(pingInterval))
+			}()
+		case pongerr := <-pong:
+			pong = nil
+			if pongerr != nil {
+				log.Error("ping-failed", pongerr)
+				close(quit)
+			}
+		case <-quit:
+			break dance
 		}
-		ws.SetPongHandler(func(string) error {
-			return ws.SetReadDeadline(time.Now().Add(pingInterval + 500*time.Millisecond))
-		})
-	}()
-	<-done
-	close(quit)
+	}
 
 	log.Info("closing-shell")
 	err = f.Close()
@@ -83,8 +116,7 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *ShellHandler) readLoop(c *websocket.Conn, w *os.File, done chan<- bool, quit <-chan struct{}) {
-	log := s.logger.Session("shell-handler")
+func readLoop(c *websocket.Conn, input chan<- ioItem, quit <-chan struct{}) {
 	for {
 		select {
 		case <-quit:
@@ -93,28 +125,16 @@ func (s *ShellHandler) readLoop(c *websocket.Conn, w *os.File, done chan<- bool,
 			mType, m, err := c.ReadMessage()
 			if mType == websocket.TextMessage {
 				if err != nil {
-					log.Error("read-error", err)
-					done <- true
+					input <- ioItem{nil, err}
 					return
 				}
-				w.Write(m)
-			} else if mType == websocket.BinaryMessage {
-				dec := gob.NewDecoder(bytes.NewReader(m))
-				winsize := &utils.Winsize{}
-				dec.Decode(winsize)
-				utils.SetWinsize(w.Fd(), winsize)
-				if err != nil {
-					log.Error("read-error", err)
-					done <- true
-					return
-				}
+				input <- ioItem{m, nil}
 			}
 		}
 	}
 }
 
-func (s *ShellHandler) writeLoop(c *websocket.Conn, r io.Reader, done chan<- bool, quit <-chan struct{}) {
-	log := s.logger.Session("shell-handler")
+func writeLoop(r io.Reader, output chan<- ioItem, quit <-chan struct{}) {
 	br := bufio.NewReader(r)
 	for {
 		select {
@@ -123,20 +143,12 @@ func (s *ShellHandler) writeLoop(c *websocket.Conn, r io.Reader, done chan<- boo
 		default:
 			x, size, err := br.ReadRune()
 			if err != nil {
-				log.Error("write-error", err)
-				done <- true
+				output <- ioItem{nil, err}
 				return
 			}
-
 			p := make([]byte, size)
 			utf8.EncodeRune(p, x)
-
-			err = c.WriteMessage(websocket.TextMessage, p)
-			if err != nil {
-				log.Error("write-error", err)
-				done <- true
-				return
-			}
+			output <- ioItem{p, nil}
 		}
 	}
 }
