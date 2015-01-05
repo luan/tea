@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"syscall"
-	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
@@ -18,13 +16,6 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-type Winsize struct {
-	Height uint16
-	Width  uint16
-	x      uint16
-	y      uint16
 }
 
 type ShellHandler struct {
@@ -65,9 +56,9 @@ dance:
 		select {
 		case binaryMessage := <-wsPipe.BinaryChannel():
 			dec := gob.NewDecoder(bytes.NewReader(binaryMessage))
-			winsize := &Winsize{}
+			winsize := &utils.Winsize{}
 			err = dec.Decode(winsize)
-			setWinsize(cmdPipe.Fd(), winsize)
+			utils.SetWinsize(cmdPipe.Fd(), winsize)
 			if err != nil {
 				log.Error("binary-message-error", err)
 			} else {
@@ -108,9 +99,4 @@ func startShell(shell string) (*os.File, error) {
 func ioCopy(dst io.Writer, src io.Reader, errc chan<- error) {
 	_, err := io.Copy(dst, src)
 	errc <- err
-}
-
-func setWinsize(fd uintptr, ws *Winsize) error {
-	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(ws)))
-	return err
 }
