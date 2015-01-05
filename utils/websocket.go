@@ -1,22 +1,27 @@
 package utils
 
 import (
-	"errors"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type websocketToPipe struct {
-	ws      *websocket.Conn
-	closing chan chan error
+	ws            *websocket.Conn
+	closing       chan chan error
+	binaryChannel chan []byte
 }
 
 func NewWebsocketToPipe(ws *websocket.Conn) *websocketToPipe {
 	return &websocketToPipe{
-		ws:      ws,
-		closing: make(chan chan error),
+		ws:            ws,
+		closing:       make(chan chan error),
+		binaryChannel: make(chan []byte),
 	}
+}
+
+func (wstp *websocketToPipe) BinaryChannel() <-chan []byte {
+	return wstp.binaryChannel
 }
 
 func (wstp *websocketToPipe) Read(p []byte) (int, error) {
@@ -27,8 +32,11 @@ func (wstp *websocketToPipe) Read(p []byte) (int, error) {
 		}
 		copy(p, m)
 		return len(m), nil
+	} else if mType == websocket.BinaryMessage {
+		wstp.binaryChannel <- m
+		return -1, nil
 	}
-	return 0, errors.New("unsupported message type")
+	return 0, nil
 }
 
 func (wstp *websocketToPipe) Write(p []byte) (int, error) {

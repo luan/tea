@@ -1,10 +1,14 @@
 package handlers
 
 import (
+	"bytes"
+	"encoding/gob"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"syscall"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/kr/pty"
@@ -14,6 +18,13 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type Winsize struct {
+	Height uint16
+	Width  uint16
+	x      uint16
+	y      uint16
 }
 
 type ShellHandler struct {
@@ -49,10 +60,27 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go ioCopy(cmdPipe, wsPipe, errc)
 	go ioCopy(wsPipe, cmdPipe, errc)
 
-	if err = <-errc; err != nil {
-		log.Error("io-error", err)
+dance:
+	for {
+		select {
+		case binaryMessage := <-wsPipe.BinaryChannel():
+			dec := gob.NewDecoder(bytes.NewReader(binaryMessage))
+			winsize := &Winsize{}
+			err = dec.Decode(winsize)
+			setWinsize(cmdPipe.Fd(), winsize)
+			if err != nil {
+				log.Error("binary-message-error", err)
+			} else {
+				log.Info("window-resize", lager.Data{"winsize": winsize})
+			}
+		case err = <-errc:
+			if err != nil {
+				log.Error("io-error", err)
+			}
+			err = wsPipe.Close()
+			break dance
+		}
 	}
-	err = wsPipe.Close()
 
 	log.Info("closing-shell")
 	err = cmdPipe.Close()
@@ -66,7 +94,7 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func startShell(shell string) (io.ReadWriteCloser, error) {
+func startShell(shell string) (*os.File, error) {
 	cmd := exec.Command(shell)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
@@ -80,4 +108,9 @@ func startShell(shell string) (io.ReadWriteCloser, error) {
 func ioCopy(dst io.Writer, src io.Reader, errc chan<- error) {
 	_, err := io.Copy(dst, src)
 	errc <- err
+}
+
+func setWinsize(fd uintptr, ws *Winsize) error {
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(ws)))
+	return err
 }
