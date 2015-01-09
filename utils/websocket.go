@@ -10,6 +10,7 @@ type websocketToPipe struct {
 	ws            *websocket.Conn
 	closing       chan chan error
 	binaryChannel chan []byte
+	closed        bool
 }
 
 func NewWebsocketToPipe(ws *websocket.Conn) *websocketToPipe {
@@ -26,15 +27,15 @@ func (wstp *websocketToPipe) BinaryChannel() <-chan []byte {
 
 func (wstp *websocketToPipe) Read(p []byte) (int, error) {
 	mType, m, err := wstp.ws.ReadMessage()
+	if err != nil {
+		return 0, err
+	}
 	if mType == websocket.TextMessage {
-		if err != nil {
-			return 0, err
-		}
 		copy(p, m)
 		return len(m), nil
 	} else if mType == websocket.BinaryMessage {
 		wstp.binaryChannel <- m
-		return -1, nil
+		return 0, nil
 	}
 	return 0, nil
 }

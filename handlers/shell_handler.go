@@ -45,7 +45,7 @@ func (s *ShellHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	errc := make(chan error)
+	errc := make(chan error, 2)
 	wsPipe := utils.NewWebsocketToPipe(ws)
 	go wsPipe.Run()
 	go ioCopy(cmdPipe, wsPipe, errc)
@@ -73,6 +73,19 @@ dance:
 		}
 	}
 
+	// flush all possible messages on errc
+flush:
+	for {
+		select {
+		case <-errc:
+			if err != nil {
+				log.Error("io-error", err)
+			}
+		default:
+			break flush
+		}
+	}
+
 	log.Info("closing-shell")
 	err = cmdPipe.Close()
 	if err != nil {
@@ -83,6 +96,7 @@ dance:
 	if err != nil {
 		log.Error("closing-websocket-failed", err)
 	}
+	log.Info("shell-closed")
 }
 
 func startShell(shell string) (*os.File, error) {
