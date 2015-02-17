@@ -5,11 +5,8 @@ import (
 	"encoding/gob"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
 
 	"github.com/gorilla/websocket"
-	"github.com/kr/pty"
 	"github.com/luan/tea/utils"
 	"github.com/pivotal-golang/lager"
 )
@@ -97,17 +94,6 @@ flush:
 		log.Error("closing-websocket-failed", err)
 	}
 	log.Info("shell-closed")
-}
-
-func startShell(shell string) (*os.File, error) {
-	cmd := exec.Command(shell)
-	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
-	f, err := pty.Start(cmd)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
 }
 
 func ioCopy(dst io.Writer, src io.Reader, errc chan<- error) {
